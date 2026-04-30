@@ -5,6 +5,8 @@ import time
 import random
 import mss  # Folosim mss pentru a face print screen rapid
 import threading
+import sys
+from detector import detect_metins_standard, detect_metins_red
 
 # Configurare port serial
 PORT = "COM7"
@@ -63,84 +65,21 @@ def move_mouse_hardware(target_x, target_y):
         send_command(f"MOVE,{step_x},{step_y}")
         time.sleep(0.015)  # Pauza mica ca controllerul sa aiba timp sa proceseze
 
-def detect_metins():
-    """Face screenshot si detecteaza metinele returnand centrele (x, y)."""
-    with mss.MSS() as sct:
-        # Preluam ecranul principal
-        monitor = sct.monitors[1]
-        img = np.array(sct.grab(monitor))
-
-        # Scoate canalul alfa (mss returneaza format BGRA)
-        if img.shape[2] == 4:
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-            
-        # Procesare imagine folosind logica data de tine
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-        # Trebuie sa convertim la int32 pentru a preveni overflow la operatii si adunare
-        R = img_rgb[:, :, 0].astype(np.int32)
-        G = img_rgb[:, :, 1].astype(np.int32)
-        B = img_rgb[:, :, 2].astype(np.int32)
-
-        mask = (
-            (G >= 80) & (G <= 180) &
-            (R >= 5) & (R <= 120) &
-            (B >= 3) & (B <= 120) &
-            (G > R + 30) &
-            (G > B + 30)
-        )
-
-        mask = mask.astype(np.uint8) * 255
-
-        # Curatare zgomot (am folosit kernel 3x3 pt metine mici)
-        kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        mask = cv2.dilate(mask, kernel, iterations=1)
-
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        img_height, img_width = img.shape[:2]
-        margin = 60  # Reducem marginea la 60px ca sa nu pierdem prea mult din ecran
-
-        metin_centers = []
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-
-            if area < 100:  # Prag crescut cum ai cerut
-                continue
-
-            # Detectie forma circulara
-            perimeter = cv2.arcLength(cnt, True)
-            if perimeter == 0:
-                continue
-            circularity = 4 * np.pi * area / (perimeter ** 2)
-            if circularity < 0.5:
-                continue
-
-            x, y, w, h = cv2.boundingRect(cnt)
-            ratio = w / float(h)
-            if 0.5 < ratio < 1.5:
-                # Calculam centrul casutei
-                cx, cy = x + (w // 2), y + (h // 2)
-                
-                # Excludem metinele care se afla prea aproape de marginile ecranului
-                # Pentru ca riscam ca personajul sa aduca click in afara zonei valide sau sa se loveasca de munti / margini
-                if cx > margin and cx < (img_width - margin) and cy > margin and cy < (img_height - margin):
-                    metin_centers.append((cx, cy))
-
-        return metin_centers, img_height
-
 # Variabila pentru a opri thread-ul secundar elegant
 running = True
 pause_picking = threading.Event()
 
 def item_picker_worker():
-    """Ruleaza independent ca sa apese Z la fiecare ~0.1s indiferent ce face scriptul principal."""
+    """Ruleaza independent ca sa apese Z continuu, agresiv."""
     while running:
         if not pause_picking.is_set():
-            # Apasam de 2 ori consecutiv cu mic delay intre ele (hardware are un mic cooldown intern pt HID)
+            # Apasam de 4 ori consecutiv ca sa ridice itemele picate repede (Fast Pickup rapid)
             send_command("KEY,Z")
-            time.sleep(0.03)
+            time.sleep(0.015)
+            send_command("KEY,Z")
+            time.sleep(0.015)
+            send_command("KEY,Z")
+            time.sleep(0.015)
             send_command("KEY,Z")
         
         # Pauza principala ~0.1s + o mica variatie sa para uman
@@ -185,7 +124,7 @@ def main():
                 # Click metine o data la 0.3s + random
                 if current_time - last_metin_time >= random_delay(0.3, 0.1):
                     # Acum facem screenshot in timp util si verificam daca se vede un metin
-                    metins, img_height = detect_metins()
+                    metins, img_height = detect_metins_red()
                     
                     if metins:
                         # Filtram metinele ca sa nu dam click pe unul care e prea aproape de unde am dat deja
