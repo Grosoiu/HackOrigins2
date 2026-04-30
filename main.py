@@ -100,7 +100,7 @@ def detect_metins():
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         img_height, img_width = img.shape[:2]
-        margin = 150  # Ignoram metinele aflate la mai putin de 150px de marginea ecranului
+        margin = 60  # Reducem marginea la 60px ca sa nu pierdem prea mult din ecran
 
         metin_centers = []
         for cnt in contours:
@@ -155,6 +155,7 @@ def main():
     picker_thread.start()
     
     last_metin_time = time.time()
+    last_click_time = time.time() # Tine minte cand am lovit cu succes ultima data un metin
     metins_farmed = 0
     in_cooldown = False
     cooldown_end_time = 0
@@ -173,10 +174,18 @@ def main():
                     metins_farmed = 0
                     clicked_metins.clear() # stergem memoria cu metinele anterioare
             else:
+                # Verificam daca am inceput un rând de metine dar NU mai gasim alte metine pe ecran
+                if metins_farmed > 0 and (current_time - last_click_time) > 4.0:
+                    print(f"Am dat click pe {metins_farmed} metine din 6 si nu mai gasesc altele noi! Fortez cooldown-ul.")
+                    in_cooldown = True
+                    cooldown_end_time = current_time + random_delay(7.0, 2.0)
+                    last_click_time = current_time # Resetam ca sa nu intre iara aici
+                    continue
+                
                 # Click metine o data la 0.3s + random
                 if current_time - last_metin_time >= random_delay(0.3, 0.1):
                     # Acum facem screenshot in timp util si verificam daca se vede un metin
-                    metins = detect_metins()
+                    metins, img_height = detect_metins()
                     
                     if metins:
                         # Filtram metinele ca sa nu dam click pe unul care e prea aproape de unde am dat deja
@@ -196,7 +205,22 @@ def main():
                             last_metin_time = current_time
                             continue
                             
-                        target = random.choice(valid_metins)
+                        # Daca jocul nu duce queue cu alternanta dreapta-stanga / sus-jos (zig-zag prea agresiv),
+                        # le ordonam in functie de cat de aproape sunt de ultimul metin pe care am dat click
+                        # Astfel personajul se misca fluid intr-o singura directie, curatand ecranul.
+                        
+                        if len(clicked_metins) > 0:
+                            last_click_x, last_click_y = clicked_metins[-1]
+                            # Sortam dupa distanta fata de ultimul click, astfel le ia "in lant" (la rand)
+                            valid_metins.sort(key=lambda m: (m[0] - last_click_x)**2 + (m[1] - last_click_y)**2)
+                            
+                            # Alegem urmatorul metin ca fiind strict cel mai apropiat de ultimul metin pe care am dat click
+                            # pentru a pastra un lant perfect (fara sa iteram mai mult vizual).
+                            target = valid_metins[0]
+                        else:
+                            # Primul click din serie il dam pur random (sau cu prioritate pe jumatatea vizibila)
+                            target = random.choice(valid_metins)
+                            
                         cx, cy = target
                         
                         # Salvam pentru a nu mai da click a 2-a oara
@@ -225,18 +249,20 @@ def main():
                         pause_picking.clear()
 
                         metins_farmed += 1
-                        print(f"[{metins_farmed}/10] Am dat click pe un metin la coord {cx}, {cy}")
+                        print(f"[{metins_farmed}/6] Am dat click pe un metin la coord {cx}, {cy}")
                         
                         if metins_farmed == 1:
                             print("Am dat click pe primul metin. Facem pauza de 2 secunde pentru calibrare queue...")
                             time.sleep(random_delay(2.0, 0.5))
                         
                         if metins_farmed >= 6:
-                            print("Am atins limita de 10zzz metine. Asteptam cooldown-ul (~1 minut)...")
+                            print("Am atins limita de 6 metine. Asteptam cooldown-ul (~1 minut)...")
                             in_cooldown = True
                             
-                            # Timp randomizat pentru cooldown in jurul a 60 de secunde
-                            cooldown_end_time = current_time + random_delay(30.0, 5.0) 
+                            # Timp randomizat pentru cooldown in jurul a 30 de secunde
+                            cooldown_end_time = current_time + random_delay(7.0, 2.0) 
+                            
+                        last_click_time = current_time
                             
                     last_metin_time = current_time # Resetam timpul metinului fie ca am gasit sau nu
                     
@@ -250,3 +276,4 @@ def main():
         ser.close()
 
 if __name__ == "__main__":
+    main()
