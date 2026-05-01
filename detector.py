@@ -4,7 +4,7 @@ import mss
 
 def detect_metins_standard(margin=60):
     """Face screenshot si detecteaza metinele returnand centrele (x, y) si inaltimea imaginii."""
-    with mss.MSS() as sct:
+    with mss.mss() as sct:
         # Preluam ecranul principal
         monitor = sct.monitors[1]
         img = np.array(sct.grab(monitor))
@@ -70,7 +70,7 @@ def detect_metins_standard(margin=60):
 
 def detect_metins_red(margin=60):
     """Face screenshot si detecteaza metinele rosii returnand centrele (x, y) si inaltimea imaginii."""
-    with mss.MSS() as sct:
+    with mss.mss() as sct:
         # Preluam ecranul principal
         monitor = sct.monitors[1]
         img = np.array(sct.grab(monitor))
@@ -128,3 +128,57 @@ def detect_metins_red(margin=60):
                     metin_centers.append((cx, cy))
 
         return metin_centers, img_height
+
+def detect_metins_snake(margin_pct=0.2, y_offset=10):
+    """
+    Face screenshot si detecteaza metinele cautand textul lor alb (Snake), 
+    returnand centrele modificate in jos (pt a lovi metinul) si inaltimea imaginii.
+    """
+    with mss.mss() as sct:
+        monitor = sct.monitors[1]
+        img = np.array(sct.grab(monitor))
+
+        # Scoatem canalul alfa
+        if img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            
+        height, width = img.shape[:2]
+
+        # 1. Margini - cautam doar in mijloc pt a evita chat, nume playeri, etc
+        margin_y = int(height * margin_pct)
+        margin_x = int(width * margin_pct)
+        
+        roi_mask = np.zeros((height, width), dtype=np.uint8)
+        roi_mask[margin_y:height-margin_y, margin_x:width-margin_x] = 255
+
+        # 2. Detectie culoare alb curat
+        # img in OpenCV este BGR, asa ca formatul este [B, G, R]
+        lower_white = np.array([245, 245, 245], dtype=np.uint8)
+        upper_white = np.array([255, 255, 255], dtype=np.uint8)
+        
+        color_mask = cv2.inRange(img, lower_white, upper_white)
+
+        # 3. Masca finala care pastreaza doar centrul
+        final_mask = cv2.bitwise_and(color_mask, roi_mask)
+
+        # 4. Clean-up morofologic ca in test (doar dilatare cu kernel text)
+        kernel_text = np.ones((2, 10), np.uint8)
+        clean_mask = cv2.dilate(final_mask, kernel_text, iterations=1)
+
+        contours, _ = cv2.findContours(clean_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        metin_centers = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            x, y, w, h = cv2.boundingRect(cnt)
+            
+            # Filtram forma specifică de text alb mic returnată de algoritm
+            if area > 10 and w > 10 and h >= 3 and w > h:
+                # Calculam centrul textului determinat
+                cx = x + (w // 2)
+                # Adaugam cativa pixeli in jos (ex. y_offset) pentru a indica corpul metinului, nu textul
+                cy = y + (h // 2) + y_offset
+                
+                metin_centers.append((cx, cy))
+
+        return metin_centers, height

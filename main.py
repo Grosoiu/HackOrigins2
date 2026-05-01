@@ -6,7 +6,7 @@ import random
 import mss  # Folosim mss pentru a face print screen rapid
 import threading
 import sys
-from detector import detect_metins_standard, detect_metins_red
+from detector import detect_metins_standard, detect_metins_red, detect_metins_snake
 
 # Configurare port serial
 PORT = "COM7"
@@ -87,11 +87,36 @@ def item_picker_worker():
 
 def main():
     global running
-    print("Incepem automatizarea...")
     
-    # Pornim thread-ul pentru ridicat iteme
-    picker_thread = threading.Thread(target=item_picker_worker)
-    picker_thread.start()
+    pick_items_input = input("Vrei sa fie activa functia de ridicat iteme (Z)? (da/nu): ").strip().lower()
+    pick_items = pick_items_input in ['da', 'd', 'yes', 'y', '1']
+    
+    print("\nAlege metoda de detectare a metinelor:")
+    print("1. Standard")
+    print("2. Rosu (Red)")
+    print("3. Sarpe (Snake)")
+    method_input = input("Introdu numarul (1/2/3): ").strip()
+    
+    if method_input == '2':
+        detect_func = detect_metins_red
+        print("Ai ales detectarea metinelor: Rosu")
+    elif method_input == '3':
+        detect_func = detect_metins_snake
+        print("Ai ales detectarea metinelor: Sarpe")
+    else:
+        detect_func = detect_metins_standard
+        print("Ai ales detectarea metinelor: Standard")
+        
+    print("\nIncepem automatizarea...")
+    time.sleep(5)
+    
+    # Pornim thread-ul pentru ridicat iteme doar daca s-a ales
+    if pick_items:
+        picker_thread = threading.Thread(target=item_picker_worker)
+        picker_thread.start()
+        print("Functia de ridicat iteme (Z) este ACTIVA.")
+    else:
+        print("Functia de ridicat iteme (Z) este INACTIVA.")
     
     last_metin_time = time.time()
     last_click_time = time.time() # Tine minte cand am lovit cu succes ultima data un metin
@@ -124,7 +149,7 @@ def main():
                 # Click metine o data la 0.3s + random
                 if current_time - last_metin_time >= random_delay(0.3, 0.1):
                     # Acum facem screenshot in timp util si verificam daca se vede un metin
-                    metins, img_height = detect_metins_red()
+                    metins, img_height = detect_func()
                     
                     if metins:
                         # Filtram metinele ca sa nu dam click pe unul care e prea aproape de unde am dat deja
