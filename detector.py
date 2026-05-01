@@ -129,7 +129,7 @@ def detect_metins_red(margin=60):
 
         return metin_centers, img_height
 
-def detect_metins_snake(margin_pct=0.2, y_offset=10):
+def detect_metins_snake(margin_pct=0.2, y_offset=3):
     """
     Face screenshot si detecteaza metinele cautand textul lor alb (Snake), 
     returnand centrele modificate in jos (pt a lovi metinul) si inaltimea imaginii.
