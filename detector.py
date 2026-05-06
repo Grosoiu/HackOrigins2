@@ -182,3 +182,48 @@ def detect_metins_snake(margin_pct=0.2, y_offset=50):
                 metin_centers.append((cx, cy))
 
         return metin_centers, height
+
+def detect_fish_obs(cap):
+    """
+    Face o citire rapida direct din fluxul VideoCapture (OBS Virtual Camera).
+    Returneaza 2 variabile: 
+    1. (x, y) - Daca pestele este in cercul interior (< 58px) unde avem voie sa dam click
+    2. True/False - Daca pestele a fost detectat oriunde in aria mare a minigame-ului (pentru a sti ca minigame-ul exista)
+    """
+    ret, frame = cap.read()
+    if not ret:
+        return None, False
+        
+    width, height = 1366, 768
+    center_x, center_y = width // 2, height // 2
+
+    # Toleranta pt culoarea pestelui
+    lower_color = np.array([115, 85, 55], dtype=np.uint8)
+    upper_color = np.array([125, 95, 65], dtype=np.uint8)
+
+    # Cream o masca mare cat fereastra de minigame (~150px) ca sa vedem daca exista pestele
+    mask_large = np.zeros(frame.shape[:2], dtype=np.uint8)
+    cv2.circle(mask_large, (center_x, center_y), 150, 255, -1)
+
+    circle_roi = cv2.bitwise_and(frame, frame, mask=mask_large)
+    color_mask = cv2.inRange(circle_roi, lower_color, upper_color)
+
+    contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    is_minigame_active = False
+    valid_click_pos = None
+
+    for cnt in contours:
+        if cv2.contourArea(cnt) > 5:
+            is_minigame_active = True
+            
+            x, y, w, h = cv2.boundingRect(cnt)
+            cx, cy = x + (w // 2), y + (h // 2)
+            
+            dist_to_center = ((cx - center_x)**2 + (cy - center_y)**2)**0.5
+            if dist_to_center <= 58:
+                valid_click_pos = (cx, cy)
+            
+            break 
+            
+    return valid_click_pos, is_minigame_active

@@ -6,7 +6,7 @@ import random
 import mss  # Folosim mss pentru a face print screen rapid
 import threading
 import sys
-from detector import detect_metins_standard, detect_metins_red, detect_metins_snake
+from detector import detect_metins_standard, detect_metins_red, detect_metins_snake, detect_fish_obs
 
 # Configurare port serial
 PORT = "COM7"
@@ -34,6 +34,7 @@ def random_delay(base_time, variation=0.15):
     return base_time + random.uniform(0.0, variation)
 
 import ctypes
+import win32gui
 
 # Structura pentru a citi pozitia mouse-ului nativ de pe Windows
 class POINT(ctypes.Structure):
@@ -44,26 +45,57 @@ def get_mouse_pos():
     ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
     return pt.x, pt.y
 
-def move_mouse_hardware(target_x, target_y):
+def get_game_offset():
+    """Afla coordonata absoluta (x,y) de pe desktop a colțului ferestrei jocului."""
+    hwnd = win32gui.FindWindow(None, "Origins")
+    if hwnd:
+        pt = POINT(0, 0) # Colțul top-left al zonei de randare a jocului (fara Windows bar)
+        ctypes.windll.user32.ClientToScreen(hwnd, ctypes.byref(pt))
+        return pt.x, pt.y
+    return 0, 0
+
+def move_mouse_hardware(target_x, target_y, is_fishing=False):
     """Calculeaza diferenta si muta hardware progresiv pentru a atinge coordonata, din cauza acceleratiei de pe Windows"""
+    if is_fishing:
+        # La pescuit, aflam distanta o singura data si pompam instantele catre controller orbesti
+        # in pachete maxime de 127, fara a mai pierde timp recalculand get_mouse_pos() (fara blocaje/feedback loop).
+        curr_x, curr_y = get_mouse_pos()
+        dx = target_x - curr_x
+        dy = target_y - curr_y
+        
+        while dx != 0 or dy != 0:
+            step_x = min(max(dx, -127), 127)
+            step_y = min(max(dy, -127), 127)
+            send_command(f"MOVE,{step_x},{step_y}")
+            dx -= step_x
+            dy -= step_y
+            time.sleep(0.001)  # Cel mai mic delay posibil pentru buffer
+        return
+
     while True:
         curr_x, curr_y = get_mouse_pos()
         dx = target_x - curr_x
         dy = target_y - curr_y
         
-        # Daca am ajuns suficient de aproape, ne oprim
-        if abs(dx) <= 3 and abs(dy) <= 3:
+        # Daca am ajuns suficient de aproape, ne oprim (toleranta putin mai mare la pescuit pentru reactie)
+        threshold = 5 if is_fishing else 3
+        if abs(dx) <= threshold and abs(dy) <= threshold:
             break
             
         # Acceleram miscarea, minim 1, maxim 127 pt compatibilitate HID
-        step_x = min(max(int(dx * 0.4), -127), 127) 
-        step_y = min(max(int(dy * 0.4), -127), 127)
+        # La pescuit mergem mai repede: 0.8 din distanta, la metine ramanem pe 0.4
+        multiplier = 0.85 if is_fishing else 0.4
+        step_x = min(max(int(dx * multiplier), -127), 127) 
+        step_y = min(max(int(dy * multiplier), -127), 127)
         
         if step_x == 0 and dx != 0: step_x = 1 if dx > 0 else -1
         if step_y == 0 and dy != 0: step_y = 1 if dy > 0 else -1
             
         send_command(f"MOVE,{step_x},{step_y}")
-        time.sleep(0.015)  # Pauza mica ca controllerul sa aiba timp sa proceseze
+        
+        # Pauza mai mica de asteptare pentru serial la pescuit
+        sleep_t = 0.005 if is_fishing else 0.015
+        time.sleep(sleep_t)
 
 # Variabila pentru a opri thread-ul secundar elegant
 running = True
@@ -85,18 +117,119 @@ def item_picker_worker():
         # Pauza principala ~0.1s + o mica variatie sa para uman
         time.sleep(random_delay(0.1, 0.05))
 
+def fishing_loop():
+    global running
+    print("\nPregatim camera virtuala de la OBS (index 1)...")
+    cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
+    
+    # Dimensiunea ecranului setata in prealabil (pentru centru calibrat perfect pe 1366x768)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1366)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 768)
+    
+    if not cap.isOpened():
+        print("Eroare la deschiderea OBS Virtual Camera. Verifica daca ai pornit-o din OBS!")
+        return
+
+    print("Incepem Pescuitul Automatizat în 5 secunde! Plaseaza ferestrele corect.")
+    time.sleep(5)
+    
+    try:
+        in_minigame = False
+        last_fish_time = time.time()
+        last_action_time = time.time() # Failsafe absolut pentru blocaje
+        
+        while True:
+            start_time = time.time()
+            
+            fish_pos, minigame_active = detect_fish_obs(cap)
+            
+            if minigame_active:
+                in_minigame = True
+                last_fish_time = time.time()
+                last_action_time = time.time()
+                
+            if fish_pos:
+                fx, fy = fish_pos
+                
+                # Transformam coordonata OBS intr-o coordonata REALĂ de pe ecran
+                offset_x, offset_y = get_game_offset()
+                real_fx = fx + offset_x
+                real_fy = fy + offset_y
+                
+                # Diferența catre Arduino este Relativă fața de cursorul de pe Windows
+                move_mouse_hardware(real_fx, real_fy, is_fishing=True)
+                
+                time.sleep(0.02)  # O mică pauză ca jocul să actualizeze poziția de hover
+                
+                send_command("LEFT_DOWN")
+                time.sleep(0.05) # Tinem apasat puțin mai mult ca să înregistreze Metin2 (50ms)
+                send_command("LEFT_UP")
+                
+                print(f"Click la ({real_fx}, {real_fy})")
+                
+                # Pauza intre click-uri redusa DRASTIC la ~0.15 secunde
+                time.sleep(random_delay(0.15, 0.05)) 
+            else:
+                current_time = time.time()
+                # 1. Daca minigame-ul s-a terminat normal (nu am vazut pestele 2.5s)
+                timeout_normal_ms = in_minigame and (current_time - last_fish_time) > 2.5
+                # 2. Daca a luat complet razna / fail / n-a gasit deloc si s-a blocat in asteptare (> 8s)
+                timeout_absolute_failsafe = not in_minigame and (current_time - last_action_time) > 8.0
+                
+                if timeout_normal_ms or timeout_absolute_failsafe:
+                    if timeout_absolute_failsafe:
+                        print("FAILSAFE Pescuit depasit 35s. Timpul a expirat! Repornesc pescuitul...")
+                    else:
+                        print("Minigame-ul s-a incheiat normal (pestele a disparut).")
+                    
+                    time.sleep(random_delay(2.0, 0.5))
+                    
+                    print("Punem rama (Apasam tasta 4)")
+                    send_command("KEY,FOUR")
+                    time.sleep(random_delay(1.5, 0.3))
+                    
+                    print("Aruncam undita (Apasam tasta SPACE)")
+                    send_command("KEY,SPACEBAR")
+                    send_command("KEY,SPACE")
+                    
+                    in_minigame = False
+                    last_fish_time = current_time
+                    last_action_time = current_time
+                    print("Incepem sa cautam pesti imediat!")
+            
+            elapsed = time.time() - start_time
+            # Procesare ultra-rapida (aprox 100 FPS cap)
+            sleep_time = max(0.01 - elapsed, 0)
+            time.sleep(sleep_time)
+
+    except KeyboardInterrupt:
+        print("Pescuit oprit de utilizator!")
+    finally:
+        cap.release()
+        send_command("LEFT_UP")
+        send_command("SHIFT_UP")
+
 def main():
     global running
     
     pick_items_input = input("Vrei sa fie activa functia de ridicat iteme (Z)? (da/nu): ").strip().lower()
     pick_items = pick_items_input in ['da', 'd', 'yes', 'y', '1']
     
-    print("\nAlege metoda de detectare a metinelor:")
-    print("1. Standard")
-    print("2. Rosu (Red)")
-    print("3. Sarpe (Snake)")
-    method_input = input("Introdu numarul (1/2/3): ").strip()
+    print("\nAlege metoda de actiune:")
+    print("1. Standard (Farmare Metine)")
+    print("2. Rosu (Farmare Metine Rosii)")
+    print("3. Sarpe (Farmare Metine cu Text Alb)")
+    print("4. Pescuit (Folosind OBS Virtual Camera)")
+    method_input = input("Introdu numarul (1/2/3/4): ").strip()
     
+    if method_input == '4':
+        print("Ai ales modul: Pescuit")
+        if pick_items:
+            picker_thread = threading.Thread(target=item_picker_worker)
+            picker_thread.start()
+        fishing_loop()
+        return
+
     if method_input == '2':
         detect_func = detect_metins_red
         print("Ai ales detectarea metinelor: Rosu")
@@ -171,7 +304,7 @@ def main():
                             
                         # Daca jocul nu duce queue cu alternanta dreapta-stanga / sus-jos (zig-zag prea agresiv),
                         # le ordonam in functie de cat de aproape sunt de ultimul metin pe care am dat click
-                        # Astfel personajul se misca fluid intr-o singura directie, curatand ecranul.
+                        # Astfel personajul se misca fluid intr-o singura directie, curatind ecranul.
                         
                         if len(clicked_metins) > 0:
                             last_click_x, last_click_y = clicked_metins[-1]
@@ -194,7 +327,7 @@ def main():
                         pause_picking.set()
                         
                         # Vom simula pe PC miscarea ca apoi sa apasam cu controller-ul
-                        move_mouse_hardware(cx, cy)
+                        move_mouse_hardware(cx, cy, is_fishing=False)
                         # Pauza ferma sa ne asiguram ca mouse-ul NU se mai misca deloc cand apasa click
                         time.sleep(random_delay(0.15, 0.05)) 
                         

@@ -19,6 +19,12 @@ while True:
         elif cmd == "CLICK":
             mouse.click(Mouse.LEFT_BUTTON)
 
+        elif cmd == "LEFT_DOWN":
+            mouse.press(Mouse.LEFT_BUTTON)
+
+        elif cmd == "LEFT_UP":
+            mouse.release(Mouse.LEFT_BUTTON)
+
         elif cmd == "RIGHT_CLICK":
             mouse.click(Mouse.RIGHT_BUTTON)
 

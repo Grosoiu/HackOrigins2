@@ -2,3 +2,5 @@ mss
 numpy
 opencv-python
 pytesseract
+pywin32
+Pillow
