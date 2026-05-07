@@ -227,3 +227,47 @@ def detect_fish_obs(cap):
             break 
             
     return valid_click_pos, is_minigame_active
+
+def detect_mines(margin=60, y_offset=15):
+    """Face screenshot si detecteaza zacamintele returnand centrele (x, y) modificate in jos pentru a face click pe ele."""
+    with mss.mss() as sct:
+        monitor = sct.monitors[1]
+        img = np.array(sct.grab(monitor))
+
+        if img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+        # convertim culoarea target în HSV
+        target_bgr = np.uint8([[[93, 231, 121]]])
+        target_hsv = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2HSV)[0][0]
+
+        # toleranta (am marit plaja pentru a prinde nuantele textului mai bine)
+        lower = np.array([max(0, target_hsv[0]-3), 50, 50])
+        upper = np.array([min(179, target_hsv[0]+3), 255, 255])
+
+        mask = cv2.inRange(hsv, lower, upper)
+
+        # unire text cu un kernel lat pentru a prinde conturul intregului text
+        kernel_text = np.ones((5, 20), np.uint8)
+        mask = cv2.dilate(mask, kernel_text, iterations=1)
+
+        # gasim contururi
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        img_height, img_width = img.shape[:2]
+
+        mine_centers = []
+        for cnt in contours:
+            x,y,w,h = cv2.boundingRect(cnt)
+            
+            # cerem si ca lungimea textului sa fie vizibil mai mare decat inaltimea sa
+            if w*h > 50 and w > h * 3.7:
+                cx = x + w//2
+                cy = y + h//2 + y_offset
+                
+                if cx > margin and cx < (img_width - margin) and cy > margin and cy < (img_height - margin):
+                    mine_centers.append((cx, cy))
+
+        return mine_centers, img_height

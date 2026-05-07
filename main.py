@@ -6,7 +6,7 @@ import random
 import mss  # Folosim mss pentru a face print screen rapid
 import threading
 import sys
-from detector import detect_metins_standard, detect_metins_red, detect_metins_snake, detect_fish_obs
+from detector import detect_metins_standard, detect_metins_red, detect_metins_snake, detect_fish_obs, detect_mines
 
 # Configurare port serial
 PORT = "COM7"
@@ -209,6 +209,52 @@ def fishing_loop():
         send_command("LEFT_UP")
         send_command("SHIFT_UP")
 
+def mining_loop():
+    global running
+    print("\nIncepem Mineritul Automatizat în 5 secunde!...")
+    time.sleep(5)
+    
+    with mss.mss() as sct:
+        monitor = sct.monitors[1]
+        center_x = monitor["width"] // 2
+        center_y = monitor["height"] // 2
+
+    try:
+        while True:
+            mines, img_height = detect_mines()
+            
+            if mines:
+                # Sortam si prioritizam zacamantul cel mai aproape de personaj (centrul ecranului)
+                mines.sort(key=lambda m: (m[0] - center_x)**2 + (m[1] - center_y)**2)
+                target = mines[0]
+                cx, cy = target
+                
+                move_mouse_hardware(cx, cy, is_fishing=False)
+                time.sleep(random_delay(0.15, 0.05))
+                
+                # Click stanga pe zacamant
+                send_command("LEFT_DOWN")
+                time.sleep(random_delay(0.05, 0.02))
+                send_command("LEFT_UP")
+                
+                print(f"Am dat click pe zacamant la {cx}, {cy}. Asteptam 15 secunde si ridicam iteme...")
+                
+                # Asteptam ~15 secunde (timpul de actiune la minat) inainte de a da alt click.
+                # Apasam 'Z' in timp ce minam in caz cazz mai cade ceva sau la final.zzzzzzzz
+                for i in range(3):
+                    send_command("KEY,Z")
+                    time.sleep(0.3)
+                    
+            else:
+                # Niciun zacamant vizibil, mai cautam scurt
+                time.sleep(0.5)
+
+    except KeyboardInterrupt:
+        print("Minerit oprit de utilizator!")
+    finally:
+        send_command("LEFT_UP")
+        send_command("SHIFT_UP")
+
 def main():
     global running
     
@@ -219,9 +265,16 @@ def main():
     print("1. Standard (Farmare Metine)")
     print("2. Rosu (Farmare Metine Rosii)")
     print("3. Sarpe (Farmare Metine cu Text Alb)")
-    print("4. Pescuit (Folosind OBS Virtual Camera)")
-    method_input = input("Introdu numarul (1/2/3/4): ").strip()
+    print("z. Pescuit (Folosind OBS Virtual Camera)")
+    print("5. Minerit (Farmare Zacaminte)")
+    method_input = input("Introdu numarul (1/2/3/4/5): ").strip()
     
+    if method_input == '5':
+        print("Ai ales modul: Minerit")
+        # Nu pornim thread-ul de pick agresiv, facem pickup manual in loop in ritm de 1s
+        mining_loop()
+        return
+
     if method_input == '4':
         print("Ai ales modul: Pescuit")
         if pick_items:
