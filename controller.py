@@ -40,9 +40,25 @@ while True:
         elif cmd == "SHIFT_UP":
             keyboard.release(Keycode.SHIFT)
 
+        elif cmd.startswith("KEY_DOWN"):
+            _, k = cmd.split(",")
+            try:
+                keyboard.press(getattr(Keycode, k))
+            except AttributeError:
+                pass  # tasta necunoscuta, ignora
+
+        elif cmd.startswith("KEY_UP"):
+            _, k = cmd.split(",")
+            try:
+                keyboard.release(getattr(Keycode, k))
+            except AttributeError:
+                pass  # tasta necunoscuta, ignora
+
         elif cmd.startswith("KEY"):
             _, k = cmd.split(",")
             try:
-                keyboard.send(getattr(Keycode, k))
+                keycode = getattr(Keycode, k)
+                keyboard.press(keycode)
+                keyboard.release(keycode)
             except AttributeError:
                 pass  # tasta necunoscuta, ignora

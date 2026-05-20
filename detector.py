@@ -183,6 +183,128 @@ def detect_metins_snake(margin_pct=0.2, y_offset=50):
 
         return metin_centers, height
 
+def detect_fireland_metins(margin=60, show_result=True):
+    """
+    Detecteaza metinele violet din Fireland si afiseaza masca + detectiile.
+
+    Returneaza:
+        metin_centers -> lista de tuple (x, y)
+        mask -> imaginea binara folosita la detectie
+        result -> imaginea finala cu detectiile desenate
+    """
+    with mss.mss() as sct:
+        monitor = sct.monitors[1]
+        img = np.array(sct.grab(monitor))
+
+    # Convertim BGRA -> BGR
+    if img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+    original = img.copy()
+
+    # RGB
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    R = img_rgb[:, :, 0].astype(np.int32)
+    G = img_rgb[:, :, 1].astype(np.int32)
+    B = img_rgb[:, :, 2].astype(np.int32)
+
+    """
+    Fireland metins:
+    - violet / mov
+    - B si R dominante
+    - G mai mic
+    """
+
+    mask = (
+        (R > 55) &
+        (B > 55) &
+        (G < 90) &
+        (R < 190) &
+        (B < 190) &
+        # mov = R si B apropiate
+        (np.abs(R - B) < 70) &
+        # mov dominant peste verde
+        (R > G + 25) &
+        (B > G + 25)
+    )
+
+    # uint8
+    mask = mask.astype(np.uint8) * 255
+
+    # Curatare zgomot
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.dilate(mask, kernel, iterations=1)
+
+    # Contours
+    contours, _ = cv2.findContours(
+        mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    img_height, img_width = img.shape[:2]
+
+    metin_centers = []
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+
+        # filtre bune pentru metine Fireland
+        if area < 60 or area > 2500:
+            continue
+
+        perimeter = cv2.arcLength(cnt, True)
+
+        if perimeter == 0:
+            continue
+
+        circularity = 4 * np.pi * area / (perimeter ** 2)
+
+        # metinele sunt compacte
+        if circularity < 0.35:
+            continue
+
+        x, y, w, h = cv2.boundingRect(cnt)
+
+        ratio = w / float(h)
+
+        # aproximativ patrate
+        if not (0.5 < ratio < 1.5):
+            continue
+
+        cx = x + w // 2
+        cy = y + h // 2
+
+        # evita marginile
+        if (
+            cx < margin or
+            cx > img_width - margin or
+            cy < margin or
+            cy > img_height - margin
+        ):
+            continue
+
+        metin_centers.append((cx, cy))
+
+        # Draw detection
+        cv2.rectangle(original, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.circle(original, (cx, cy), 4, (0, 0, 255), -1)
+
+    # Overlay masca peste imagine
+    colored_mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    overlay = original.copy()
+    overlay[:, :, 1] = np.maximum(overlay[:, :, 1], mask)
+
+    if show_result:
+        cv2.imshow("MASK", mask)
+        cv2.imshow("RESULT", overlay)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    return metin_centers, mask, overlay
+
 def detect_fish_obs(cap):
     """
     Face o citire rapida direct din fluxul VideoCapture (OBS Virtual Camera).

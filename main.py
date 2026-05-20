@@ -6,10 +6,10 @@ import random
 import mss  # Folosim mss pentru a face print screen rapid
 import threading
 import sys
-from detector import detect_metins_standard, detect_metins_red, detect_metins_snake, detect_fish_obs, detect_mines
+from detector import detect_metins_standard, detect_metins_red, detect_metins_snake, detect_fireland_metins, detect_fish_obs, detect_mines
 
 # Configurare port serial
-PORT = "COM7"
+PORT = "COM3"
 BAUDRATE = 115200
 
 print(f"Conectare la {PORT}...")
@@ -265,9 +265,10 @@ def main():
     print("1. Standard (Farmare Metine)")
     print("2. Rosu (Farmare Metine Rosii)")
     print("3. Sarpe (Farmare Metine cu Text Alb)")
+    print("6. Fireland (Farmare Metine Violet)")
     print("z. Pescuit (Folosind OBS Virtual Camera)")
     print("5. Minerit (Farmare Zacaminte)")
-    method_input = input("Introdu numarul (1/2/3/4/5): ").strip()
+    method_input = input("Introdu numarul (1/2/3/4/5/6): ").strip()
     
     if method_input == '5':
         print("Ai ales modul: Minerit")
@@ -283,12 +284,17 @@ def main():
         fishing_loop()
         return
 
+    fireland_mode = False
     if method_input == '2':
         detect_func = detect_metins_red
         print("Ai ales detectarea metinelor: Rosu")
     elif method_input == '3':
         detect_func = detect_metins_snake
         print("Ai ales detectarea metinelor: Sarpe")
+    elif method_input == '6':
+        detect_func = detect_fireland_metins
+        fireland_mode = True
+        print("Ai ales detectarea metinelor: Fireland")
     else:
         detect_func = detect_metins_standard
         print("Ai ales detectarea metinelor: Standard")
@@ -335,7 +341,8 @@ def main():
                 # Click metine o data la 0.3s + random
                 if current_time - last_metin_time >= random_delay(0.3, 0.1):
                     # Acum facem screenshot in timp util si verificam daca se vede un metin
-                    metins, img_height = detect_func()
+                    result = detect_func(show_result=False) if fireland_mode else detect_func()
+                    metins = result[0]
                     
                     if metins:
                         # Filtram metinele ca sa nu dam click pe unul care e prea aproape de unde am dat deja
