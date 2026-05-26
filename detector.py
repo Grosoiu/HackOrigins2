@@ -1,6 +1,9 @@
 import cv2
 import numpy as np
 import mss
+from pathlib import Path
+
+from metin_shape_detect import DetectConfig, detect_metins_multi, default_ui_exclude
 
 def detect_metins_standard(margin=60):
     """Face screenshot si detecteaza metinele returnand centrele (x, y) si inaltimea imaginii."""
@@ -129,6 +132,185 @@ def detect_metins_red(margin=60):
 
         return metin_centers, img_height
 
+def detect_metins_ice(margin=60, debug=False, image_bgr=None):
+    """
+    Detecteaza metinele de gheata.
+    Returneaza:
+        - lista centre [(x, y)]
+        - imaginea cu overlay (optional)
+        - masca (optional)
+    Daca image_bgr este furnizata, nu mai face screenshot.
+    """
+
+    with mss.mss() as sct:
+
+        if image_bgr is None:
+            monitor = sct.monitors[1]
+            img_bgr = np.array(sct.grab(monitor))
+        else:
+            img_bgr = image_bgr
+
+        if img_bgr is None:
+            raise ValueError("Nu am primit o imagine valida pentru detectie.")
+
+        # Normalizeaza formatul in BGR
+        if img_bgr.ndim == 2:
+            img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
+        elif img_bgr.shape[2] == 4:
+            img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
+
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+        # =========================================================
+        # RGB channels
+        # =========================================================
+        R = img_rgb[:, :, 0].astype(np.int32)
+        G = img_rgb[:, :, 1].astype(np.int32)
+        B = img_rgb[:, :, 2].astype(np.int32)
+
+        # =========================================================
+        # MASCA METINE
+        # calibrata pe:
+        # RGB 164 190 213
+        # RGB 144 165 189
+        # =========================================================
+
+        mask = (
+            (R >= 120) & (R <= 190) &
+            (G >= 140) & (G <= 210) &
+            (B >= 160) & (B <= 240) &
+
+            # metinele sunt mai albastre
+            ((B - R) >= 15) &
+            ((B - G) >= 5) &
+
+            # eliminare podea
+            ((G - R) <= 45)
+        )
+
+        mask = mask.astype(np.uint8) * 255
+
+        # =========================================================
+        # MORPHOLOGY
+        # facem clusterele mai mari
+        # =========================================================
+
+        kernel_open = np.ones((3, 3), np.uint8)
+        kernel_dilate = np.ones((9, 9), np.uint8)
+
+        # elimina zgomot mic
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)
+
+        # uneste componentele metinului
+        mask = cv2.dilate(mask, kernel_dilate, iterations=2)
+
+        # smooth
+        mask = cv2.GaussianBlur(mask, (7, 7), 0)
+
+        # threshold din nou dupa blur
+        _, mask = cv2.threshold(mask, 80, 255, cv2.THRESH_BINARY)
+
+        # =========================================================
+        # CONTOURS
+        # =========================================================
+
+        contours, _ = cv2.findContours(
+            mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        result = img_rgb.copy()
+
+        img_h, img_w = img_rgb.shape[:2]
+
+        metin_centers = []
+
+        for cnt in contours:
+
+            area = cv2.contourArea(cnt)
+
+            # filtre bune pentru imaginea asta
+            if area < 700:
+                continue
+
+            if area > 12000:
+                continue
+
+            perimeter = cv2.arcLength(cnt, True)
+
+            if perimeter == 0:
+                continue
+
+            circularity = 4 * np.pi * area / (perimeter * perimeter)
+
+            # metinele sunt compacte
+            if circularity < 0.20:
+                continue
+
+            x, y, w, h = cv2.boundingRect(cnt)
+
+            ratio = w / float(h)
+
+            # forma aproximativ patrata
+            if not (0.45 <= ratio <= 1.8):
+                continue
+
+            cx = x + w // 2
+            cy = y + h // 2
+
+            # evita marginile
+            if (
+                cx < margin or
+                cx > img_w - margin or
+                cy < margin or
+                cy > img_h - margin
+            ):
+                continue
+
+            metin_centers.append((cx, cy))
+
+            # =====================================================
+            # DRAW
+            # =====================================================
+
+            cv2.drawContours(result, [cnt], -1, (0, 255, 0), 2)
+
+            cv2.circle(
+                result,
+                (cx, cy),
+                6,
+                (255, 0, 0),
+                -1
+            )
+
+            cv2.putText(
+                result,
+                f"{cx},{cy}",
+                (cx + 10, cy),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1
+            )
+
+        # =========================================================
+        # DEBUG
+        # =========================================================
+
+        if debug:
+
+            cv2.imshow("mask", mask)
+            cv2.imshow(
+                "result",
+                cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+            )
+
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+
+        return metin_centers, result, mask
+
 def detect_metins_snake(margin_pct=0.2, y_offset=50):
     """
     Face screenshot si detecteaza metinele cautand textul lor alb (Snake), 
@@ -182,6 +364,74 @@ def detect_metins_snake(margin_pct=0.2, y_offset=50):
                 metin_centers.append((cx, cy))
 
         return metin_centers, height
+
+
+_SHAPE_TEMPLATE_CACHE = {}
+_SHAPE_TEMPLATE_DIR = "image_lab"
+_SHAPE_TEMPLATE_NAMES = ("shape1.png", "shape2.png", "shape3.png")
+
+
+def _load_shape_templates(template_dir, template_names):
+    base = Path(template_dir)
+    if not base.is_absolute():
+        base = Path(__file__).resolve().parent / base
+
+    key = (str(base), tuple(template_names))
+    cached = _SHAPE_TEMPLATE_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    templates = []
+    for name in template_names:
+        path = base / name
+        img = cv2.imread(str(path))
+        if img is None:
+            raise FileNotFoundError(f"Nu am putut citi template: {path}")
+        templates.append(img)
+
+    _SHAPE_TEMPLATE_CACHE[key] = templates
+    return templates
+
+
+def detect_metins_shape(margin=60):
+    """
+    Detecteaza metinele pe baza de contur (shape matching).
+    Returneaza:
+        - lista centre [(x, y)]
+        - inaltimea imaginii
+    """
+
+    templates = _load_shape_templates(_SHAPE_TEMPLATE_DIR, _SHAPE_TEMPLATE_NAMES)
+    cfg = DetectConfig()
+
+    with mss.mss() as sct:
+        monitor = sct.monitors[1]
+        img_bgr = np.array(sct.grab(monitor))
+
+    if img_bgr is None:
+        raise ValueError("Nu am primit o imagine valida pentru detectie.")
+
+    if img_bgr.ndim == 2:
+        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
+    elif img_bgr.shape[2] == 4:
+        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
+
+    exclude_rects = default_ui_exclude(img_bgr)
+    detections = detect_metins_multi(img_bgr, templates, cfg, exclude_rects)
+
+    img_height, img_width = img_bgr.shape[:2]
+    metin_centers = []
+    for det in detections:
+        cx, cy = det["center"]
+        if (
+            cx > margin
+            and cx < (img_width - margin)
+            and cy > margin
+            and cy < (img_height - margin)
+        ):
+            metin_centers.append((cx, cy))
+
+    return metin_centers, img_height
 
 def detect_fireland_metins(margin=60, show_result=True):
     """

@@ -6,7 +6,7 @@ import random
 import mss  # Folosim mss pentru a face print screen rapid
 import threading
 import sys
-from detector import detect_metins_standard, detect_metins_red, detect_metins_snake, detect_fireland_metins, detect_fish_obs, detect_mines
+from detector import detect_metins_standard, detect_metins_red, detect_metins_shape, detect_metins_ice, detect_fireland_metins, detect_fish_obs, detect_mines
 
 # Configurare port serial
 PORT = "COM3"
@@ -264,11 +264,12 @@ def main():
     print("\nAlege metoda de actiune:")
     print("1. Standard (Farmare Metine)")
     print("2. Rosu (Farmare Metine Rosii)")
-    print("3. Sarpe (Farmare Metine cu Text Alb)")
+    print("3. Shape (Metine cu contur/template)")
+    print("7. Gheata (Farmare Metine de Gheata)")
     print("6. Fireland (Farmare Metine Violet)")
     print("z. Pescuit (Folosind OBS Virtual Camera)")
     print("5. Minerit (Farmare Zacaminte)")
-    method_input = input("Introdu numarul (1/2/3/4/5/6): ").strip()
+    method_input = input("Introdu numarul (1/2/3/4/5/6/7): ").strip()
     
     if method_input == '5':
         print("Ai ales modul: Minerit")
@@ -289,8 +290,11 @@ def main():
         detect_func = detect_metins_red
         print("Ai ales detectarea metinelor: Rosu")
     elif method_input == '3':
-        detect_func = detect_metins_snake
-        print("Ai ales detectarea metinelor: Sarpe")
+        detect_func = detect_metins_shape
+        print("Ai ales detectarea metinelor: Shape")
+    elif method_input == '7':
+        detect_func = detect_metins_ice
+        print("Ai ales detectarea metinelor: Gheata")
     elif method_input == '6':
         detect_func = detect_fireland_metins
         fireland_mode = True
