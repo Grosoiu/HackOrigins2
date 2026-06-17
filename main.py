@@ -7,7 +7,7 @@ import mss  # Folosim mss pentru a face print screen rapid
 import threading
 import sys
 import subprocess
-from detector import detect_metins_standard, detect_metins_red, detect_metins_shape, detect_metins_ice, detect_fireland_metins, detect_fish_obs, detect_mines
+from detector import detect_metins_standard, detect_metins_red, detect_metins_shape, detect_metins_ice, detect_fireland_metins, detect_fish_obs, detect_mines, detect_metins_minge
 from detect_pm.pm_detector import detect_pm_flag
 from detect_pm.telegram_notify import send_telegram_message
 
@@ -197,7 +197,7 @@ def handle_pm_response(match_center):
     time.sleep(0.4)
 
     # Scriem mesajul
-    reply_text = "Hi, yes, will be going to sleep soon! Thanks for the PM :)"
+    reply_text = "Hi, yes, farming! Thanks for the PM :)"
     print(f"[PM] Scriem: \"{reply_text}\"")
     type_string_hardware(reply_text)
     time.sleep(0.3)
@@ -414,7 +414,8 @@ def main():
     print("6. Fireland (Farmare Metine Violet)")
     print("z. Pescuit (Folosind OBS Virtual Camera)")
     print("5. Minerit (Farmare Zacaminte)")
-    method_input = input("Introdu numarul (1/2/3/4/5/6/7): ").strip()
+    print("e. Event (Farmare Metine Minge de Fotbal)")
+    method_input = input("Introdu numarul (1/2/3/4/5/6/7/e): ").strip().lower()
 
     pm_thread = threading.Thread(target=pm_monitor_worker, daemon=True)
     pm_thread.start()
@@ -449,6 +450,9 @@ def main():
         detect_func = detect_fireland_metins
         fireland_mode = True
         print("Ai ales detectarea metinelor: Fireland")
+    elif method_input == 'e':
+        detect_func = detect_metins_minge
+        print("Ai ales detectarea metinelor: Event (Minge de Fotbal)")
     else:
         detect_func = detect_metins_standard
         print("Ai ales detectarea metinelor: Standard")

@@ -678,6 +678,74 @@ def detect_fish_obs(cap):
             
     return valid_click_pos, is_minigame_active
 
+def detect_metins_minge(margin=40):
+    """Face screenshot si detecteaza metinele in forma de minge de fotbal (event).
+    Returneaza centrele (cx, cy) si inaltimea imaginii.
+
+    Mingile sunt alb-negru (desaturate) pe iarba verzuie -> NU merge pe culoare
+    ca la metinele verzi/rosii. Le separam astfel:
+      - albul mingii  = pixeli foarte LUMINOSI si DESATURATI
+                        (iarba luminata e saturata -> exclusa)
+      - pentagoanele  = pixeli foarte INTUNECATI
+    Apoi unim totul intr-un blob plin per minge si filtram dupa forma (elipsa).
+    """
+    with mss.mss() as sct:
+        monitor = sct.monitors[1]
+        img = np.array(sct.grab(monitor))
+
+        # Scoate canalul alfa (mss returneaza BGRA)
+        if img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+        img_height, img_width = img.shape[:2]
+
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        S = hsv[:, :, 1]
+        V = hsv[:, :, 2]
+
+        # Corpul mingii: alb stralucitor desaturat SAU negru profund
+        white = (V > 165) & (S < 55)
+        black = (V < 60) & (S < 90)
+        mask = ((white | black).astype(np.uint8)) * 255
+
+        # Unim petalele alb/negru intr-un singur blob plin per minge
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((21, 21), np.uint8), iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8))
+
+        black_u = black.astype(np.uint8)  # pt verificarea pentagoanelor
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        metin_centers = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 1500 or area > 30000:        # mingile sunt obiecte mari pe ecran
+                continue
+
+            x, y, w, h = cv2.boundingRect(cnt)
+            ratio = w / float(h)
+            if not (0.7 < ratio < 2.0):            # elipse (perspectiva le face mai late)
+                continue
+
+            # soliditate: blob plin, nu textura imprastiata de drum/UI
+            hull = cv2.contourArea(cv2.convexHull(cnt))
+            solidity = area / hull if hull > 0 else 0
+            if solidity < 0.7:
+                continue
+            if area / (w * h) < 0.45:              # umple boundingbox-ul
+                continue
+
+            # trebuie sa contina pentagoane negre (drumul deschis nu are -> respins)
+            black_frac = black_u[y:y+h, x:x+w].sum() / float(w * h)
+            if black_frac < 0.03:
+                continue
+
+            cx, cy = x + (w // 2), y + (h // 2)
+            if cx > margin and cx < (img_width - margin) and cy > margin and cy < (img_height - margin):
+                metin_centers.append((cx, cy))
+
+        return metin_centers, img_height
+
 def detect_mines(margin=60, y_offset=15):
     """Face screenshot si detecteaza zacamintele returnand centrele (x, y) modificate in jos pentru a face click pe ele."""
     with mss.mss() as sct:
