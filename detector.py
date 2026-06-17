@@ -1,9 +1,6 @@
 import cv2
 import numpy as np
 import mss
-from pathlib import Path
-
-from metin_shape_detect import DetectConfig, detect_metins_multi, default_ui_exclude
 
 def detect_metins_standard(margin=60):
     """Face screenshot si detecteaza metinele returnand centrele (x, y) si inaltimea imaginii."""
@@ -140,6 +137,10 @@ def detect_metins_ice(margin=60, debug=False, image_bgr=None):
         - imaginea cu overlay (optional)
         - masca (optional)
     Daca image_bgr este furnizata, nu mai face screenshot.
+        # ---------------------------------------------------------------------------
+        # Zone de UI ignorate (layout 1920x1080, full-screen). Ajusteaza la rezolutia ta.
+        # Format: (x0, y0, x1, y1)
+        # ---------------------------------------------------------------------------
     """
 
     with mss.mss() as sct:
@@ -309,6 +310,7 @@ def detect_metins_ice(margin=60, debug=False, image_bgr=None):
             cv2.waitKey(0)
             cv2.destroyAllWindows()
 
+
         return metin_centers, result, mask
 
 def detect_metins_snake(margin_pct=0.2, y_offset=50):
@@ -366,72 +368,148 @@ def detect_metins_snake(margin_pct=0.2, y_offset=50):
         return metin_centers, height
 
 
-_SHAPE_TEMPLATE_CACHE = {}
-_SHAPE_TEMPLATE_DIR = "image_lab"
-_SHAPE_TEMPLATE_NAMES = ("shape1.png", "shape2.png", "shape3.png")
+# ---------------------------------------------------------------------------
+# Zone de UI ignorate (layout 1920x1080, full-screen). Ajusteaza la rezolutia ta.
+# Format: (x0, y0, x1, y1)
+# ---------------------------------------------------------------------------
+UI_ZONES_1080 = [
+    (0,    0,   405, 108),    # bara de iconite stanga-sus
+    (1555, 0,  1920, 250),    # minimap + panou eveniment (dreapta-sus)
+    (900,  0,   985, 60),     # iconita cos / shop (centru-sus)
+    (0,    968, 1920, 1080),  # chat + bara de skilluri (jos)
+    (0,    785, 260, 875),    # panoul de status (stanga-jos)
+    (760,  395, 1045, 670),   # personaj + pet + gramada de mobi (centrul ecranului)
+]
 
 
-def _load_shape_templates(template_dir, template_names):
-    base = Path(template_dir)
-    if not base.is_absolute():
-        base = Path(__file__).resolve().parent / base
-
-    key = (str(base), tuple(template_names))
-    cached = _SHAPE_TEMPLATE_CACHE.get(key)
-    if cached is not None:
-        return cached
-
-    templates = []
-    for name in template_names:
-        path = base / name
-        img = cv2.imread(str(path))
-        if img is None:
-            raise FileNotFoundError(f"Nu am putut citi template: {path}")
-        templates.append(img)
-
-    _SHAPE_TEMPLATE_CACHE[key] = templates
-    return templates
+def _relief(gray):
+    """Deviatia standard locala a luminantei = energia de relief (textura 3D)."""
+    k = 15
+    m = cv2.boxFilter(gray, -1, (k, k))
+    s = cv2.boxFilter(gray * gray, -1, (k, k))
+    return np.sqrt(np.maximum(s - m * m, 0)) > 21
 
 
-def detect_metins_shape(margin=60):
+def _terrain_mass(relief, min_mass=25000):
+    """Mase mari, continue de relief = munte / pod / padure / gramada de mobi."""
+    H, W = relief.shape
+    closed = cv2.morphologyEx(
+        relief.astype(np.uint8) * 255, cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(closed, 8)
+    terr = np.zeros((H, W), np.uint8)
+    for i in range(1, n):
+        if st[i, 4] > min_mass:
+            terr[lab == i] = 255
+    return terr > 0
+
+
+def _build_metin_mask(img_bgr, ui_zones):
+    H, W = img_bgr.shape[:2]
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    Hh = hsv[:, :, 0].astype(np.int32)
+    Ss = hsv[:, :, 1].astype(np.int32)
+    B = img_bgr[:, :, 0].astype(np.int32)
+    G = img_bgr[:, :, 1].astype(np.int32)
+    R = img_bgr[:, :, 2].astype(np.int32)
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+    relief = _relief(gray)
+    blue  = (B > R + 10) & (Ss >= 28)                                       # Gheata
+    green = (Hh >= 42) & (Hh <= 92) & (G > R + 8) & (G > B + 8) & (Ss >= 50) # Vant
+    red   = (Hh <= 16) & (Ss >= 78) & (R > G + 25) & (R > B + 45)            # Pamant rosu
+    cand = relief | blue | green | red
+
+    ui = np.zeros((H, W), dtype=bool)
+    for (x0, y0, x1, y1) in ui_zones:
+        ui[y0:y1, x0:x1] = True
+    cand &= ~ui
+
+    mask = cand.astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13)))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+    # Umplem interiorul fiecarui metin PE COMPONENTA (sigur), nu cu flood-fill
+    # global din colt - acela se umfla la tot ecranul cand un zid/cladire/UI
+    # inconjoara campul.
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    filled = np.zeros_like(mask)
+    cv2.drawContours(filled, cnts, -1, 255, -1)
+    mask = filled
+    mask = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+    return mask, relief
+
+
+def _on_open_ground(hsv, blob):
     """
-    Detecteaza metinele pe baza de contur (shape matching).
-    Returneaza:
-        - lista centre [(x, y)]
-        - inaltimea imaginii
+    Testeaza daca obiectul sta pe terenul farmabil (iarba/piatra calda) si nu
+    pe munte/padure. Verifica culoarea medie a inelului din jurul obiectului:
+      - teren bun  -> ton cald (H 15-42), saturatie medie (S 34-78), luminos (V>=82)
+      - munte/stanca -> gri desaturat (S mic) ; padure -> verde (H mare)
     """
+    inner = cv2.dilate(blob, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+    outer = cv2.dilate(blob, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (45, 45)))
+    ring = cv2.subtract(outer, inner) > 0
+    if ring.sum() < 50:
+        return False
+    h = np.median(hsv[ring][:, 0]); s = np.median(hsv[ring][:, 1]); v = np.median(hsv[ring][:, 2])
+    return (15 <= h <= 42) and (34 <= s <= 78) and (v >= 82)
 
-    templates = _load_shape_templates(_SHAPE_TEMPLATE_DIR, _SHAPE_TEMPLATE_NAMES)
-    cfg = DetectConfig()
 
+def detect_metins_relief(margin=55, ui_zones=None, min_area=650, max_area=20000):
+    """
+    Face screenshot si detecteaza metinele (Gheata / Vant / Pamant / Foc) pe
+    terenul farmabil, ignorand muntele, podul, padurea si gramada de mobi.
+    Returneaza (metin_centers, img_height) - aceeasi semnatura ca celelalte functii.
+    """
     with mss.mss() as sct:
         monitor = sct.monitors[1]
-        img_bgr = np.array(sct.grab(monitor))
+        img = np.array(sct.grab(monitor))
+        if img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
-    if img_bgr is None:
-        raise ValueError("Nu am primit o imagine valida pentru detectie.")
+        if ui_zones is None:
+            ui_zones = UI_ZONES_1080
 
-    if img_bgr.ndim == 2:
-        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
-    elif img_bgr.shape[2] == 4:
-        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
+        H, W = img.shape[:2]
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        mask, relief = _build_metin_mask(img, ui_zones)
+        terrain = _terrain_mass(relief)
 
-    exclude_rects = default_ui_exclude(img_bgr)
-    detections = detect_metins_multi(img_bgr, templates, cfg, exclude_rects)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        metin_centers = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < min_area or area > max_area:    # prea mic / mase uriase (munte, pod)
+                continue
+            x, y, w, h = cv2.boundingRect(cnt)
+            if h < 20 or max(w, h) < 36:
+                continue
 
-    img_height, img_width = img_bgr.shape[:2]
-    metin_centers = []
-    for det in detections:
-        cx, cy = det["center"]
-        if (
-            cx > margin
-            and cx < (img_width - margin)
-            and cy > margin
-            and cy < (img_height - margin)
-        ):
-            metin_centers.append((cx, cy))
+            blob = np.zeros((H, W), np.uint8)
+            cv2.drawContours(blob, [cnt], -1, 255, -1)
+            bpx = blob > 0
 
-    return metin_centers, img_height
+            # respinge ce se suprapune cu o masa mare de teren (munte/pod/mobi)
+            if float(terrain[bpx].mean()) > 0.30:
+                continue
+            # pastreaza doar ce sta pe terenul farmabil
+            if not _on_open_ground(hsv, blob):
+                continue
+
+            M = cv2.moments(cnt)
+            if M["m00"] == 0:
+                continue
+            cx = int(M["m10"] / M["m00"]); cy = int(M["m01"] / M["m00"])
+            if margin < cx < W - margin and margin < cy < H - margin:
+                metin_centers.append((cx, cy))
+
+        return metin_centers, H
+
+
+def detect_metins_shape(margin=55, ui_zones=None):
+    """Compat wrapper: foloseste detectia pe relief in loc de template matching."""
+    return detect_metins_relief(margin=margin, ui_zones=ui_zones)
 
 def detect_fireland_metins(margin=60, show_result=True):
     """
@@ -566,7 +644,7 @@ def detect_fish_obs(cap):
     if not ret:
         return None, False
         
-    width, height = 1366, 768
+    width, height = 1920, 1080
     center_x, center_y = width // 2, height // 2
 
     # Toleranta pt culoarea pestelui

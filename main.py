@@ -6,11 +6,16 @@ import random
 import mss  # Folosim mss pentru a face print screen rapid
 import threading
 import sys
+import subprocess
 from detector import detect_metins_standard, detect_metins_red, detect_metins_shape, detect_metins_ice, detect_fireland_metins, detect_fish_obs, detect_mines
+from detect_pm.pm_detector import detect_pm_flag
+from detect_pm.telegram_notify import send_telegram_message
 
 # Configurare port serial
 PORT = "COM3"
 BAUDRATE = 115200
+PM_CHECK_INTERVAL = 1.0
+PM_THRESHOLD = 0.9
 
 print(f"Conectare la {PORT}...")
 try:
@@ -54,36 +59,35 @@ def get_game_offset():
         return pt.x, pt.y
     return 0, 0
 
-def move_mouse_hardware(target_x, target_y, is_fishing=False):
+def move_mouse_hardware(target_x, target_y, is_fishing=False, force=False):
     """Calculeaza diferenta si muta hardware progresiv pentru a atinge coordonata, din cauza acceleratiei de pe Windows"""
     if is_fishing:
-        # La pescuit, aflam distanta o singura data si pompam instantele catre controller orbesti
-        # in pachete maxime de 127, fara a mai pierde timp recalculand get_mouse_pos() (fara blocaje/feedback loop).
         curr_x, curr_y = get_mouse_pos()
         dx = target_x - curr_x
         dy = target_y - curr_y
         
         while dx != 0 or dy != 0:
+            if not force and stop_event.is_set():
+                break
             step_x = min(max(dx, -127), 127)
             step_y = min(max(dy, -127), 127)
             send_command(f"MOVE,{step_x},{step_y}")
             dx -= step_x
             dy -= step_y
-            time.sleep(0.001)  # Cel mai mic delay posibil pentru buffer
+            time.sleep(0.001)
         return
 
     while True:
+        if not force and stop_event.is_set():
+            break
         curr_x, curr_y = get_mouse_pos()
         dx = target_x - curr_x
         dy = target_y - curr_y
         
-        # Daca am ajuns suficient de aproape, ne oprim (toleranta putin mai mare la pescuit pentru reactie)
         threshold = 5 if is_fishing else 3
         if abs(dx) <= threshold and abs(dy) <= threshold:
             break
             
-        # Acceleram miscarea, minim 1, maxim 127 pt compatibilitate HID
-        # La pescuit mergem mai repede: 0.8 din distanta, la metine ramanem pe 0.4
         multiplier = 0.85 if is_fishing else 0.4
         step_x = min(max(int(dx * multiplier), -127), 127) 
         step_y = min(max(int(dy * multiplier), -127), 127)
@@ -93,17 +97,135 @@ def move_mouse_hardware(target_x, target_y, is_fishing=False):
             
         send_command(f"MOVE,{step_x},{step_y}")
         
-        # Pauza mai mica de asteptare pentru serial la pescuit
         sleep_t = 0.005 if is_fishing else 0.015
         time.sleep(sleep_t)
 
 # Variabila pentru a opri thread-ul secundar elegant
 running = True
 pause_picking = threading.Event()
+stop_event = threading.Event()
+pm_match_center = None  # Coordonatele PM-ului detectat, setat de pm_monitor_worker
+
+# Mapare caractere speciale catre comenzi HID
+_SPECIAL_KEYS = {
+    " ": "SPACE",
+    "!": "SHIFT_EXCL",  # Shift + 1 – trimitem manual mai jos
+}
+
+# Caractere care necesita Shift
+_SHIFT_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()_+{}|:\"<>?")
+
+def type_string_hardware(text: str, char_delay: float = 0.06):
+    """Trimite un text complet prin HID, caracter cu caracter.
+    Folosim KEY_DOWN + delay + KEY_UP ca jocul sa inregistreze fiecare tasta."""
+    for ch in text:
+        if ch == " ":
+            send_command("KEY_DOWN,SPACE")
+            time.sleep(0.03)
+            send_command("KEY_UP,SPACE")
+        elif ch == "!":
+            send_command("SHIFT_DOWN")
+            time.sleep(0.03)
+            send_command("KEY_DOWN,ONE")
+            time.sleep(0.03)
+            send_command("KEY_UP,ONE")
+            time.sleep(0.02)
+            send_command("SHIFT_UP")
+        elif ch.isalpha() and ch.isupper():
+            send_command("SHIFT_DOWN")
+            time.sleep(0.03)
+            send_command(f"KEY_DOWN,{ch.upper()}")
+            time.sleep(0.03)
+            send_command(f"KEY_UP,{ch.upper()}")
+            time.sleep(0.02)
+            send_command("SHIFT_UP")
+        elif ch.isalpha():
+            send_command(f"KEY_DOWN,{ch.upper()}")
+            time.sleep(0.03)
+            send_command(f"KEY_UP,{ch.upper()}")
+        else:
+            # Skip unhandled characters
+            pass
+        time.sleep(char_delay)
+
+def handle_pm_response(match_center):
+    """
+    Raspunde automat la PM-ul detectat:
+    1. Pauza 1s dupa oprirea automatizarii (sa se opreasca totul)
+    2. 3x click pe icoana PM cu 300ms intre ele
+    3. Click la 300x380 (camp de text)
+    4. Scrie "Yes going to sleep!"
+    5. Trimite mesajul (Enter)
+    6. Inchide procesul Origins
+    """
+    if match_center is None:
+        print("[PM] Nu am coordonate de match, sar peste raspuns automat.")
+        return
+
+    mx, my = match_center
+
+    # Asteptam 1 secunda ca totul sa se opreasca (metine, pickup, etc.)
+    print("[PM] Eliberam tastele si asteptam 1 secunda...")
+    send_command("SHIFT_UP")
+    send_command("RIGHT_UP")
+    send_command("LEFT_UP")
+    time.sleep(1.0)
+
+    # Mutam mouse-ul pe icoana PM
+    print(f"[PM] Mutam mouse-ul pe PM la ({mx}, {my})...")
+    move_mouse_hardware(mx, my, is_fishing=False, force=True)
+    time.sleep(0.3)
+
+    # 3 click-uri pe icoana PM cu 300ms delay intre ele
+    for i in range(3):
+        send_command("LEFT_DOWN")
+        time.sleep(0.04)
+        send_command("LEFT_UP")
+        print(f"[PM] Click {i+1}/3 pe PM")
+        time.sleep(0.3)
+
+    # Asteptam sa se deschida fereastra PM
+    time.sleep(1.0)
+
+    # Click la 300x380 (campul de input / raspuns)
+    print("[PM] Click la (300, 380) pentru campul de text...")
+    move_mouse_hardware(300, 380, is_fishing=False, force=True)
+    time.sleep(0.3)
+    send_command("LEFT_DOWN")
+    time.sleep(0.04)
+    send_command("LEFT_UP")
+    time.sleep(0.4)
+
+    # Scriem mesajul
+    reply_text = "Hi, yes, will be going to sleep soon! Thanks for the PM :)"
+    print(f"[PM] Scriem: \"{reply_text}\"")
+    type_string_hardware(reply_text)
+    time.sleep(0.3)
+
+    # Trimitem mesajul cu Enter
+    send_command("KEY_DOWN,ENTER")
+    time.sleep(0.05)
+    send_command("KEY_UP,ENTER")
+    time.sleep(0.5)
+
+    # Inchidem procesul Origins (cautam dupa titlul ferestrei)
+    print("[PM] Inchidem procesul Origins...")
+    try:
+        hwnd = win32gui.FindWindow(None, "Origins")
+        if hwnd:
+            # Obtinem PID-ul din window handle
+            pid = ctypes.c_ulong()
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            subprocess.run(["taskkill", "/f", "/pid", str(pid.value)], timeout=5)
+            print(f"[PM] Origins (PID {pid.value}) inchis cu succes.")
+        else:
+            print("[PM] Nu am gasit fereastra Origins.")
+    except Exception as e:
+        print(f"[PM] Eroare la inchiderea Origins: {e}")
 
 def item_picker_worker():
     """Ruleaza independent ca sa apese Z continuu, agresiv."""
-    while running:
+    while running and not stop_event.is_set():
         if not pause_picking.is_set():
             # Apasam de 4 ori consecutiv ca sa ridice itemele picate repede (Fast Pickup rapid)
             send_command("KEY,Z")
@@ -116,6 +238,29 @@ def item_picker_worker():
         
         # Pauza principala ~0.1s + o mica variatie sa para uman
         time.sleep(random_delay(0.1, 0.05))
+
+def pm_monitor_worker(interval=PM_CHECK_INTERVAL, threshold=PM_THRESHOLD):
+    global running, pm_match_center
+    while not stop_event.is_set():
+        try:
+            flag, score, match_center = detect_pm_flag(debug=True, threshold=threshold)
+        except Exception as e:
+            print(f"[PM] Eroare detectie: {e}")
+            time.sleep(interval)
+            continue
+
+        if flag:
+            print(f"[PM] PM detectat. Score={score:.3f}. Oprim automatizarea.")
+            msg = f"PM detectat in joc. Score={score:.3f}."
+            if not send_telegram_message(msg, debug=True):
+                print("[PM] Nu am putut trimite mesaj Telegram (token/chat_id lipsa sau eroare).")
+            pm_match_center = match_center
+            stop_event.set()
+            running = False
+            pause_picking.set()
+            break
+
+        time.sleep(interval)
 
 def fishing_loop():
     global running
@@ -138,7 +283,7 @@ def fishing_loop():
         last_fish_time = time.time()
         last_action_time = time.time() # Failsafe absolut pentru blocaje
         
-        while True:
+        while not stop_event.is_set():
             start_time = time.time()
             
             fish_pos, minigame_active = detect_fish_obs(cap)
@@ -220,7 +365,7 @@ def mining_loop():
         center_y = monitor["height"] // 2
 
     try:
-        while True:
+        while not stop_event.is_set():
             mines, img_height = detect_mines()
             
             if mines:
@@ -270,11 +415,15 @@ def main():
     print("z. Pescuit (Folosind OBS Virtual Camera)")
     print("5. Minerit (Farmare Zacaminte)")
     method_input = input("Introdu numarul (1/2/3/4/5/6/7): ").strip()
+
+    pm_thread = threading.Thread(target=pm_monitor_worker, daemon=True)
+    pm_thread.start()
     
     if method_input == '5':
         print("Ai ales modul: Minerit")
         # Nu pornim thread-ul de pick agresiv, facem pickup manual in loop in ritm de 1s
         mining_loop()
+        ser.close()
         return
 
     if method_input == '4':
@@ -283,6 +432,7 @@ def main():
             picker_thread = threading.Thread(target=item_picker_worker)
             picker_thread.start()
         fishing_loop()
+        ser.close()
         return
 
     fireland_mode = False
@@ -322,7 +472,7 @@ def main():
     clicked_metins = [] # memorie pentru a evita click-urile multiple pe acelasi metin
 
     try:
-        while True:
+        while not stop_event.is_set():
             current_time = time.time()
             
             # 2. Gestionare Metine (Cooldown sau Click)
@@ -400,7 +550,11 @@ def main():
                         time.sleep(random_delay(0.05, 0.02)) # Jocul sa citeasca ca Shift-ul e apasat inaine de click
                         
                         send_command("RIGHT_DOWN")
-                        time.sleep(random_delay(0.03, 0.02)) # Click extrem de scurt
+                        time.sleep(random_delay(0.02, 0.02)) # Click extrem de scurt
+                        send_command("RIGHT_UP")
+
+                        send_command("RIGHT_DOWN")
+                        time.sleep(random_delay(0.02, 0.02)) # Click extrem de scurt
                         send_command("RIGHT_UP")
                         
                         time.sleep(random_delay(0.03, 0.02))
@@ -414,14 +568,14 @@ def main():
                         
                         if metins_farmed == 1:
                             print("Am dat click pe primul metin. Facem pauza de 2 secunde pentru calibrare queue...")
-                            time.sleep(random_delay(2.0, 0.5))
+                            time.sleep(random_delay(1.0, 0.5))
                         
-                        if metins_farmed >= 6:
-                            print("Am atins limita de 6 metine. Asteptam cooldown-ul (~1 minut)...")
+                        if metins_farmed >= 10:
+                            print("Am atins limita de 10 metine. Asteptam cooldown-ul (~1 minut)...")
                             in_cooldown = True
                             
                             # Timp randomizat pentru cooldown in jurul a 30 de secunde
-                            cooldown_end_time = current_time + random_delay(7.0, 2.0) 
+                            cooldown_end_time = current_time + random_delay(4.0, 1.0) 
                             
                         last_click_time = current_time
                             
@@ -434,6 +588,12 @@ def main():
         print("Script oprit de utilizator!")
     finally:
         send_command("SHIFT_UP") # Ne asiguram ca e eliberat mereu la inchidere
+
+        # Daca PM-ul a oprit automatizarea, raspundem din thread-ul principal (fara conflicte serial)
+        if pm_match_center is not None:
+            print("[PM] Automatizarea s-a oprit. Raspundem la PM din thread-ul principal...")
+            handle_pm_response(pm_match_center)
+
         ser.close()
 
 if __name__ == "__main__":
